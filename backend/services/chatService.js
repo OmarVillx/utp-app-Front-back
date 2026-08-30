@@ -1,0 +1,448 @@
+const { Pool } = require("pg");
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
+
+// ─────────────────────────────────────────────────────────────
+// REPORTES (persistido en reportes_sae)
+// ─────────────────────────────────────────────────────────────
+async function reportarMensaje({ msgId, chatId, reporterId }) {
+  const msg = await pool.query(
+    `SELECT codigo_usu FROM mensajes WHERE id_mensaje = $1`,
+    [msgId]
+  );
+  if (msg.rows.length === 0) {
+    return { eliminado: false, reportes: 0 };
+  }
+  const reportadoId = msg.rows[0].codigo_usu;
+
+  const yaReporto = await pool.query(
+    `SELECT 1 FROM reportes_sae WHERE id_mensaje = $1 AND id_usuario_reporta = $2`,
+    [msgId, reporterId]
+  );
+  if (yaReporto.rows.length === 0) {
+    await pool.query(
+      `INSERT INTO reportes_sae (id_usuario_reporta, id_usuario_reportado, id_mensaje, motivo, estado)
+       VALUES ($1, $2, $3, 'contenido inapropiado', 'pendiente')`,
+      [reporterId, reportadoId, msgId]
+    );
+  }
+
+  const conteo = await pool.query(
+    `SELECT COUNT(DISTINCT id_usuario_reporta) AS total FROM reportes_sae WHERE id_mensaje = $1`,
+    [msgId]
+  );
+  const total = parseInt(conteo.rows[0].total, 10);
+
+  if (total >= 5) {
+    await pool.query(`UPDATE mensajes SET eliminado = true WHERE id_mensaje = $1`, [msgId]);
+    return { eliminado: true, reportes: total };
+  }
+  return { eliminado: false, reportes: total };
+}
+
+// ─────────────────────────────────────────────────────────────
+// REACCIONES (persistido en reacciones_mensaje)
+// ─────────────────────────────────────────────────────────────
+async function reaccionarMensaje({ msgId, userId, emoji }) {
+  const existente = await pool.query(
+    `SELECT 1 FROM reacciones_mensaje WHERE id_mensaje = $1 AND codigo_usu = $2 AND emoji = $3`,
+    [msgId, userId, emoji]
+  );
+
+  let quitar;
+  if (existente.rows.length > 0) {
+    await pool.query(
+      `DELETE FROM reacciones_mensaje WHERE id_mensaje = $1 AND codigo_usu = $2 AND emoji = $3`,
+      [msgId, userId, emoji]
+    );
+    quitar = true;
+  } else {
+    await pool.query(
+      `INSERT INTO reacciones_mensaje (id_mensaje, codigo_usu, emoji) VALUES ($1, $2, $3)`,
+      [msgId, userId, emoji]
+    );
+    quitar = false;
+  }
+
+  const conteo = await pool.query(
+    `SELECT COUNT(*) AS total FROM reacciones_mensaje WHERE id_mensaje = $1 AND emoji = $2`,
+    [msgId, emoji]
+  );
+
+  return { count: parseInt(conteo.rows[0].total, 10), quitar };
+}
+
+// ─────────────────────────────────────────────────────────────
+// CHATS / CONTACTOS (100% BD: grupos + privados)
+// ─────────────────────────────────────────────────────────────
+async function getChatsDeUsuario(userId) {
+  try {
+    const res = await pool.query(
+      `SELECT 
+        c.id_chat AS id,
+        CASE 
+          WHEN c.tipo_chat = 'privado' THEN u2.username
+          ELSE c.nombre
+        END AS nombre,
+        CASE 
+          WHEN c.tipo_chat = 'privado' THEN 'amigo'
+          ELSE 'grupo'
+        END AS tipo,
+        COALESCE(u2.estado, 'Ausente') AS estado,
+        0 AS "mensajesNoLeidos"
+      FROM participantes_chat pc
+      JOIN chats c ON c.id_chat = pc.id_chat
+      LEFT JOIN chats_privados cp ON cp.id_chat = c.id_chat
+      LEFT JOIN usuarios u2 ON (
+        (u2.codigo_usu = cp.id_usuario_1 AND cp.id_usuario_1 != $1)
+        OR
+        (u2.codigo_usu = cp.id_usuario_2 AND cp.id_usuario_2 != $1)
+      )
+      WHERE pc.codigo_usu = $1 AND pc.estado = 'activo'
+      ORDER BY c.tipo_chat DESC`,
+      [userId]
+    );
+    return res.rows;
+  } catch (err) {
+    console.error("[getChatsDeUsuario] Error:", err.message);
+    return [];
+  }
+}
+
+// Obtiene (o crea) el chat privado entre dos usuarios
+async function obtenerOCrearChatPrivado(userId1, userId2) {
+  const existente = await pool.query(
+    `
+    SELECT id_chat FROM chats_privados
+    WHERE (id_usuario_1 = $1 AND id_usuario_2 = $2)
+       OR (id_usuario_1 = $2 AND id_usuario_2 = $1)
+    `,
+    [userId1, userId2]
+  );
+
+  if (existente.rows.length > 0) {
+    return existente.rows[0].id_chat;
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const chat = await client.query(
+      `INSERT INTO chats (nombre, tipo_chat, creado_por)
+       VALUES (NULL, 'privado', $1)
+       RETURNING id_chat`,
+      [userId1]
+    );
+    const idChat = chat.rows[0].id_chat;
+
+    await client.query(
+      `INSERT INTO chats_privados (id_chat, id_usuario_1, id_usuario_2)
+       VALUES ($1, $2, $3)`,
+      [idChat, userId1, userId2]
+    );
+
+    await client.query("COMMIT");
+    return idChat;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// GRUPOS: crear y unirse por código de invitación
+// ─────────────────────────────────────────────────────────────
+function generarCodigoInvitacion() {
+  const alfabeto = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+  let codigo = "";
+  for (let i = 0; i < 6; i++) {
+    codigo += alfabeto[Math.floor(Math.random() * alfabeto.length)];
+  }
+  return codigo;
+}
+
+async function crearGrupo({ nombre, descripcion, creadorId }) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    let idChat, codigo;
+    for (let intento = 0; intento < 5; intento++) {
+      codigo = generarCodigoInvitacion();
+      try {
+        const res = await client.query(
+          `INSERT INTO chats (nombre, descripcion, tipo_chat, creado_por, codigo_invitacion)
+           VALUES ($1, $2, 'grupo', $3, $4)
+           RETURNING id_chat`,
+          [nombre, descripcion || null, creadorId, codigo]
+        );
+        idChat = res.rows[0].id_chat;
+        break;
+      } catch (err) {
+        if (err.code === "23505" && intento < 4) continue;
+        throw err;
+      }
+    }
+
+    await client.query(
+      `INSERT INTO participantes_chat (id_chat, codigo_usu, rol)
+       VALUES ($1, $2, 'admin')`,
+      [idChat, creadorId]
+    );
+
+    await client.query("COMMIT");
+    return { idChat, codigo, nombre };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function unirseGrupoConCodigo({ codigo, userId }) {
+  const grupo = await pool.query(
+    `SELECT id_chat, nombre FROM chats WHERE codigo_invitacion = $1 AND tipo_chat = 'grupo'`,
+    [(codigo || "").toUpperCase()]
+  );
+
+  if (grupo.rows.length === 0) {
+    const err = new Error("Código de invitación inválido");
+    err.status = 404;
+    throw err;
+  }
+
+  const { id_chat: idChat, nombre } = grupo.rows[0];
+
+  const yaEsParticipante = await pool.query(
+    `SELECT 1 FROM participantes_chat WHERE id_chat = $1 AND codigo_usu = $2`,
+    [idChat, userId]
+  );
+
+  if (yaEsParticipante.rows.length === 0) {
+    await pool.query(
+      `INSERT INTO participantes_chat (id_chat, codigo_usu) VALUES ($1, $2)`,
+      [idChat, userId]
+    );
+  }
+
+  return { idChat, nombre };
+}
+
+// ─────────────────────────────────────────────────────────────
+// MENSAJES (100% BD, genérico para cualquier chatId, con reacciones)
+// ─────────────────────────────────────────────────────────────
+async function getMensajes(chatId) {
+  const res = await pool.query(
+    `SELECT
+      m.id_mensaje AS id,
+      m.id_chat AS "chatId",
+      m.contenido AS texto,
+      TO_CHAR(m.fecha_envio, 'HH12:MI AM') AS hora,
+      m.codigo_usu AS "remitenteId",
+      u.username AS remitente,
+      m.eliminado,
+      false AS mio,
+      COALESCE(r.reacciones, '{}'::json) AS reacciones
+    FROM mensajes m
+    JOIN usuarios u ON u.codigo_usu = m.codigo_usu
+    LEFT JOIN (
+      SELECT id_mensaje, json_object_agg(emoji, cnt) AS reacciones
+      FROM (
+        SELECT id_mensaje, emoji, COUNT(*) AS cnt
+        FROM reacciones_mensaje
+        GROUP BY id_mensaje, emoji
+      ) sub
+      GROUP BY id_mensaje
+    ) r ON r.id_mensaje = m.id_mensaje
+    WHERE m.id_chat = $1 AND m.eliminado = false
+    ORDER BY m.fecha_envio ASC
+    LIMIT 50`,
+    [chatId]
+  );
+  return res.rows;
+}
+
+async function guardarMensaje({ chatId, texto, remitenteId, remitente }) {
+  const res = await pool.query(
+    `INSERT INTO mensajes (id_chat, codigo_usu, contenido, tipo_mensaje)
+     VALUES ($1, $2, $3, 'texto')
+     RETURNING id_mensaje AS id, id_chat AS "chatId", contenido AS texto,
+               TO_CHAR(fecha_envio, 'HH12:MI AM') AS hora, codigo_usu AS "remitenteId"`,
+    [chatId, remitenteId, texto]
+  );
+  const msg = res.rows[0];
+  return {
+    ...msg,
+    remitente: remitente || "Usuario",
+    mio: false,
+    eliminado: false,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
+// BÚSQUEDA DE USUARIOS
+// ─────────────────────────────────────────────────────────────
+async function buscarUsuarios(query) {
+  const res = await pool.query(
+    `SELECT codigo_usu AS id, username, estado
+     FROM usuarios
+     WHERE LOWER(username) LIKE $1
+     LIMIT 20`,
+    [`%${(query || "").toLowerCase()}%`]
+  );
+  return res.rows;
+}
+
+// ─────────────────────────────────────────────────────────────
+// PRESENCIA
+// ─────────────────────────────────────────────────────────────
+async function actualizarPresencia(userId, estado) {
+  await pool.query(
+    `UPDATE usuarios SET ultima_conexion = NOW(), estado = $1 WHERE codigo_usu = $2`,
+    [estado === "En línea" ? "activo" : "inactivo", userId]
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// ADMINISTRACIÓN DE GRUPO
+// ─────────────────────────────────────────────────────────────
+
+// Verifica si un usuario es admin de un grupo
+async function esAdminDeGrupo(idChat, userId) {
+  const res = await pool.query(
+    `SELECT 1 FROM participantes_chat WHERE id_chat = $1 AND codigo_usu = $2 AND rol = 'admin'`,
+    [idChat, userId]
+  );
+  return res.rows.length > 0;
+}
+
+async function obtenerMiembrosGrupo(idChat) {
+  const res = await pool.query(
+    `SELECT u.codigo_usu AS id, u.username, u.foto_perfil AS avatar, pc.rol
+     FROM participantes_chat pc
+     JOIN usuarios u ON u.codigo_usu = pc.codigo_usu
+     WHERE pc.id_chat = $1 AND pc.estado = 'activo'
+     ORDER BY pc.rol = 'admin' DESC, u.username ASC`,
+    [idChat]
+  );
+  return res.rows;
+}
+
+async function expulsarMiembro({ idChat, adminId, userIdExpulsar }) {
+  const esAdmin = await esAdminDeGrupo(idChat, adminId);
+  if (!esAdmin) {
+    const err = new Error("No tienes permisos de administrador en este grupo");
+    err.status = 403;
+    throw err;
+  }
+  if (Number(adminId) === Number(userIdExpulsar)) {
+    const err = new Error("No puedes expulsarte a ti mismo, usa 'salir del grupo'");
+    err.status = 400;
+    throw err;
+  }
+  await pool.query(
+    `DELETE FROM participantes_chat WHERE id_chat = $1 AND codigo_usu = $2`,
+    [idChat, userIdExpulsar]
+  );
+  return { ok: true };
+}
+
+async function actualizarGrupo({ idChat, adminId, nombre, descripcion }) {
+  const esAdmin = await esAdminDeGrupo(idChat, adminId);
+  if (!esAdmin) {
+    const err = new Error("No tienes permisos de administrador en este grupo");
+    err.status = 403;
+    throw err;
+  }
+  const res = await pool.query(
+    `UPDATE chats SET nombre = COALESCE($1, nombre), descripcion = COALESCE($2, descripcion)
+     WHERE id_chat = $3
+     RETURNING id_chat AS id, nombre, descripcion`,
+    [nombre || null, descripcion ?? null, idChat]
+  );
+  return res.rows[0];
+}
+
+async function salirDeGrupo({ idChat, userId }) {
+  const participante = await pool.query(
+    `SELECT rol FROM participantes_chat WHERE id_chat = $1 AND codigo_usu = $2`,
+    [idChat, userId]
+  );
+  if (participante.rows.length === 0) {
+    const err = new Error("No perteneces a este grupo");
+    err.status = 404;
+    throw err;
+  }
+
+  await pool.query(
+    `DELETE FROM participantes_chat WHERE id_chat = $1 AND codigo_usu = $2`,
+    [idChat, userId]
+  );
+
+  // Si el que sale era el único admin, promueve al miembro más antiguo restante
+  if (participante.rows[0].rol === "admin") {
+    const otroAdmin = await pool.query(
+      `SELECT 1 FROM participantes_chat WHERE id_chat = $1 AND rol = 'admin'`,
+      [idChat]
+    );
+    if (otroAdmin.rows.length === 0) {
+      await pool.query(
+        `UPDATE participantes_chat SET rol = 'admin'
+         WHERE id_participante = (
+           SELECT id_participante FROM participantes_chat
+           WHERE id_chat = $1
+           ORDER BY fecha_union ASC
+           LIMIT 1
+         )`,
+        [idChat]
+      );
+    }
+  }
+
+  return { ok: true };
+}
+
+async function regenerarCodigoInvitacion({ idChat, adminId }) {
+  const esAdmin = await esAdminDeGrupo(idChat, adminId);
+  if (!esAdmin) {
+    const err = new Error("No tienes permisos de administrador en este grupo");
+    err.status = 403;
+    throw err;
+  }
+
+  for (let intento = 0; intento < 5; intento++) {
+    const codigo = generarCodigoInvitacion();
+    try {
+      await pool.query(`UPDATE chats SET codigo_invitacion = $1 WHERE id_chat = $2`, [codigo, idChat]);
+      return { codigo };
+    } catch (err) {
+      if (err.code === "23505" && intento < 4) continue;
+      throw err;
+    }
+  }
+}
+
+module.exports = {
+  getChatsDeUsuario,
+  obtenerOCrearChatPrivado,
+  crearGrupo,
+  unirseGrupoConCodigo,
+  getMensajes,
+  guardarMensaje,
+  buscarUsuarios,
+  actualizarPresencia,
+  reportarMensaje,
+  reaccionarMensaje,
+  obtenerMiembrosGrupo,
+  expulsarMiembro,
+  actualizarGrupo,
+  salirDeGrupo,
+  regenerarCodigoInvitacion,
+};
