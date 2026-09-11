@@ -22,6 +22,7 @@ import ListaComunidades from "./ListaComunidades";
 import ListaPublicaciones from "./ListaPublicaciones";
 import MenuDesplegable from "./MenuDesplegable";
 import PerfilHeader from "./PerfilHeader";
+import SelectorPresencia from "./SelectorPresencia";
 import TarjetaPerfil from "./TarjetaPerfil";
 import Preferencias from "./Preferencias";
 
@@ -242,6 +243,8 @@ export default function Perfil({ isTab = false, onGoToTab }) {
 >
 
         <TarjetaPerfil usuario={usuario} />
+
+        <SelectorPresencia />
 
         <DatosRegistro usuario={usuario} />
 

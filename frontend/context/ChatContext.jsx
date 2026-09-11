@@ -9,6 +9,7 @@ export function ChatProvider({ children, userId = "1", nombreUsuario = "Yo" }) {
   const [chatActivo, setChatActivoState] = useState(null);
   const [escribiendoPor, setEscribiendoPor] = useState({});
   const [conectado, setConectado] = useState(false);
+  const [disponibilidad, setDisponibilidad] = useState("Disponible");
 
   useEffect(() => {
     const socket = conectar();
@@ -103,6 +104,10 @@ export function ChatProvider({ children, userId = "1", nombreUsuario = "Yo" }) {
       setContactos((prev) =>
         prev.map((c) => (String(c.id) === String(uid) ? { ...c, estado } : c))
       );
+    });
+
+    socket.on("disponibilidad:confirmada", ({ disponibilidad: nueva }) => {
+      setDisponibilidad(nueva);
     });
 
     socket.on("escribiendo", ({ chatId, nombre, escribiendo }) => {
@@ -303,6 +308,15 @@ export function ChatProvider({ children, userId = "1", nombreUsuario = "Yo" }) {
     [userId]
   );
 
+  const cambiarDisponibilidad = useCallback(
+    (nuevaDisponibilidad) => {
+      const socket = getSocket();
+      if (!socket) return;
+      socket.emit("usuario:disponibilidad", { userId, disponibilidad: nuevaDisponibilidad });
+    },
+    [userId]
+  );
+
   const reaccionarMensaje = useCallback(
   (msgId, emoji) => {
     const socket = getSocket();
@@ -343,6 +357,8 @@ export function ChatProvider({ children, userId = "1", nombreUsuario = "Yo" }) {
       actualizarGrupo,
       salirDeGrupo,
       regenerarCodigoGrupo,
+      disponibilidad,
+      cambiarDisponibilidad,
       conectado,
       quienEscribe,
       userId,
