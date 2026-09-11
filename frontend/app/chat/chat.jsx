@@ -17,6 +17,7 @@ import { useChat } from "../../hooks/useChat";
 import GrupoModal from "./GrupoModal";
 import InfoGrupoModal from "./InfoGrupoModal";
 import styles from "./csschat";
+import { colorPorEstado } from "../../utils/estadoColor";
 
 const InitialAvatar = ({ nombre, sizeStyle, textStyle }) => (
   <View style={[styles.initialAvatarContainer, sizeStyle]}>
@@ -226,7 +227,7 @@ export default function Chat({ isTab = false, onGoToTab }) {
             >
               <View style={{ position: "relative", marginRight: 14 }}>
                 <InitialAvatar nombre={item.nombre} />
-                <View style={[styles.statusDot, item.estado === "Ausente" && styles.statusAway]} />
+                <View style={[styles.statusDot, { backgroundColor: colorPorEstado(item.estado) }]} />
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.contactName}>{item.nombre}</Text>

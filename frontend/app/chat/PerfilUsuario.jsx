@@ -8,6 +8,7 @@ import {
   View,
 } from "react-native";
 import styles from "./cssPerfilUsuario";
+import { colorPorEstado } from "../../utils/estadoColor";
 
 export default function PerfilUsuario({ usuario, onClose, onChatear }) {
   if (!usuario) return null;
@@ -28,7 +29,7 @@ export default function PerfilUsuario({ usuario, onClose, onChatear }) {
           <View
             style={[
               styles.statusDot,
-              usuario.estado === "Ausente" && styles.statusAway,
+              { backgroundColor: colorPorEstado(usuario.estado) },
             ]}
           />
         </View>

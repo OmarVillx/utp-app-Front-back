@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Image, ScrollView, Text, TouchableOpacity, View } from "react-native";
 import GrupoModal from "./GrupoModal";
 import styles from "./cssListaContactos";
+import { colorPorEstado } from "../../utils/estadoColor";
 const InitialAvatar = ({ nombre }) => (
   <View style={styles.initialAvatarContainer}>
     <Text style={styles.initialAvatarText}>
@@ -41,7 +42,7 @@ export default function ListaContactos({
             <View
               style={[
                 styles.statusDot,
-                item.estado === "Ausente" && styles.statusAway,
+                { backgroundColor: colorPorEstado(item.estado) },
               ]}
             />
           </View>

@@ -1,8 +1,11 @@
 import { Image, Text, View } from "react-native";
 import styles from "./cssTarjetaPerfil";
+import { useChat } from "../../hooks/useChat";
+import { colorPorEstado } from "../../utils/estadoColor";
 
 export default function TarjetaPerfil({ usuario }) {
   const isPrivado = usuario.privado === true || usuario.privado === "true";
+  const { disponibilidad } = useChat();
 
   return (
     <View style={styles.container}>
@@ -19,7 +22,7 @@ export default function TarjetaPerfil({ usuario }) {
         <View
           style={[
             styles.statusDot,
-            usuario.estado === "Ausente" && styles.statusAway,
+            { backgroundColor: colorPorEstado(disponibilidad) },
           ]}
         />
       </View>
@@ -31,7 +34,7 @@ export default function TarjetaPerfil({ usuario }) {
 
       {!isPrivado && usuario.bio ? (
         <View style={styles.bioContainer}>
-          <Text style={styles.comillas}>“</Text>
+          <Text style={styles.comillas}>"</Text>
           <Text style={styles.bio}>{usuario.bio}</Text>
         </View>
       ) : null}
