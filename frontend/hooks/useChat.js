@@ -22,6 +22,8 @@ export function useChat() {
     actualizarGrupo,
     salirDeGrupo,
     regenerarCodigoGrupo,
+    disponibilidad,
+    cambiarDisponibilidad,
     userId,
     nombreUsuario,
   } = useChats();
@@ -47,6 +49,8 @@ export function useChat() {
     actualizarGrupo,
     salirDeGrupo,
     regenerarCodigoGrupo,
+    disponibilidad,
+    cambiarDisponibilidad,
     userId,
     nombreUsuario,
   };
