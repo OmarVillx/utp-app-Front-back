@@ -91,7 +91,10 @@ async function getChatsDeUsuario(userId) {
           WHEN c.tipo_chat = 'privado' THEN 'amigo'
           ELSE 'grupo'
         END AS tipo,
-        COALESCE(u2.estado, 'Ausente') AS estado,
+        CASE
+          WHEN u2.estado != 'activo' THEN 'Ausente'
+          ELSE COALESCE(u2.disponibilidad, 'Disponible')
+        END AS estado,
         0 AS "mensajesNoLeidos"
       FROM participantes_chat pc
       JOIN chats c ON c.id_chat = pc.id_chat
@@ -110,6 +113,19 @@ async function getChatsDeUsuario(userId) {
     console.error("[getChatsDeUsuario] Error:", err.message);
     return [];
   }
+}
+
+// Cambia la disponibilidad manual del usuario (Disponible / Ocupado / No molestar)
+async function actualizarDisponibilidad(userId, disponibilidad) {
+  const valoresValidos = ["Disponible", "Ocupado", "No molestar"];
+  const valor = valoresValidos.includes(disponibilidad) ? disponibilidad : "Disponible";
+
+  const res = await pool.query(
+    `UPDATE usuarios SET disponibilidad = $1 WHERE codigo_usu = $2
+     RETURNING codigo_usu AS id, estado, disponibilidad`,
+    [valor, userId]
+  );
+  return res.rows[0];
 }
 
 // Obtiene (o crea) el chat privado entre dos usuarios
@@ -438,6 +454,7 @@ module.exports = {
   guardarMensaje,
   buscarUsuarios,
   actualizarPresencia,
+  actualizarDisponibilidad,
   reportarMensaje,
   reaccionarMensaje,
   obtenerMiembrosGrupo,

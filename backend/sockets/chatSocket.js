@@ -106,6 +106,24 @@ module.exports = function registrarSocketsChat(io) {
       console.log(`[socket] usuario conectado: ${nombre} (${userId})`);
     });
 
+    // ── Cambiar disponibilidad manual (Disponible / Ocupado / No molestar) ──
+    socket.on("usuario:disponibilidad", async ({ userId, disponibilidad }) => {
+      try {
+        const actualizado = await chatService.actualizarDisponibilidad(userId, disponibilidad);
+        const estadoMostrado = actualizado.estado !== "activo" ? "Ausente" : actualizado.disponibilidad;
+
+        socket.emit("disponibilidad:confirmada", { disponibilidad: actualizado.disponibilidad });
+
+        socket.broadcast.emit("presencia:cambio", {
+          userId,
+          nombre: socket.data.nombre,
+          estado: estadoMostrado,
+        });
+      } catch (err) {
+        console.error("[usuario:disponibilidad] Error:", err.message);
+      }
+    });
+
     socket.on("chat:unirse", async ({ chatId }) => {
       try {
         const rooms = [...socket.rooms].filter(
